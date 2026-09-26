@@ -13,6 +13,9 @@
       <label>队伍名称
         <input v-model="form.teamName" placeholder="如 青川抢修一队" />
       </label>
+      <label>推演分支
+        <input v-model="form.branchId" placeholder="默认 main（主干）" />
+      </label>
       <button class="primary block" @click="login">进入现场模式</button>
     </section>
 
@@ -31,8 +34,20 @@
         </button>
       </header>
 
+      <!-- 分支切换：已入队动作仍补传回原分支，新动作进入新分支 -->
+      <div class="branchbar">
+        <span class="cur">🌿 {{ client.s.branchId }}</span>
+        <input v-model="branchInput" list="branch-list" placeholder="切换到分支 ID" @keyup.enter="doSwitchBranch" />
+        <datalist id="branch-list">
+          <option v-for="b in branchList" :key="b.id" :value="b.id">{{ b.name || b.id }}</option>
+        </datalist>
+        <button class="mini" :disabled="client.syncing || !branchInput.trim()" @click="doSwitchBranch">
+          {{ client.syncing ? '补传中…' : '切换' }}
+        </button>
+      </div>
+
       <div class="hint" v-if="!client.online">
-        📵 当前离线，操作已存入本机队列；联网后将按发生顺序自动补传
+        📵 当前离线，操作已存入本机队列（钉住当前分支 {{ client.s.branchId }}）；联网后按发生顺序补传回原分支
       </div>
       <div class="hint ok" v-else-if="client.conflicts().length">
         ⚠️ {{ client.conflicts().length }} 条补传存在冲突，请在「队列」中处理
@@ -41,7 +56,7 @@
       <!-- 预警 -->
       <section v-show="tab === 'warn'" class="page">
         <h2>🚨 预警接收 <small>离线可查看缓存</small></h2>
-        <p class="stale" v-if="bundleStamp">离线包更新于 {{ bundleStamp }}</p>
+        <p class="stale" v-if="bundleStamp">「{{ client.s.branchId }}」离线包更新于 {{ bundleStamp }}</p>
         <div v-if="!warnings.length" class="empty">暂无生效预警</div>
         <div v-for="w in warnings" :key="w.id" class="card warn" :class="w.level">
           <div class="warn-head">
@@ -160,6 +175,7 @@
         <h2>📤 同步队列
           <small>待发 {{ pendingCount }} · 冲突 {{ client.conflicts().length }} · 已传 {{ client.acked().length }}</small>
         </h2>
+        <p class="tip">动作按入队时分支分组补传回原分支；切换分支不改变在途与待发动作的归属。</p>
         <button class="primary block" :disabled="!pendingCount || client.syncing" @click="doSync">
           {{ client.syncing ? '补传中…' : '立即联网补传（按因果顺序）' }}
         </button>
@@ -167,6 +183,7 @@
         <div v-for="a in [...client.s.queue].reverse()" :key="a.clientActionId" class="card q" :class="a.status">
           <div class="q-head">
             <b>{{ actionLabel(a.kind) }}</b>
+            <span class="br">{{ a.branchId || 'main' }}</span>
             <span class="badge">{{ statusLabel(a.status) }}</span>
           </div>
           <small>{{ a.at }} · {{ a.clientActionId.slice(0, 14) }}… · 尝试 {{ a.attempts }}</small>
@@ -174,7 +191,7 @@
             <p>⛔ {{ a.result?.msg || '业务前置不满足或与并发处置冲突' }}</p>
             <p v-if="a.result?.advisory?.length" class="adv">联动提示：{{ a.result.advisory.join('；') }}</p>
             <div class="q-actions">
-              <button class="mini" @click="quickRetry(a)">原样重提</button>
+              <button class="mini" @click="quickRetry(a)">原样重提（仍回 {{ a.branchId || 'main' }}）</button>
               <button class="mini danger" @click="client.discard(a.clientActionId)">丢弃</button>
             </div>
           </div>
@@ -201,7 +218,7 @@ import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
 import { FieldClient } from './sync.js'
 
 const client = new FieldClient(() => {}) // 用下面的响应式镜像驱动视图
-const form = reactive({ simId: '', teamId: '', teamName: '' })
+const form = reactive({ simId: '', teamId: '', teamName: '', branchId: 'main' })
 const tab = ref('warn')
 
 // 响应式镜像：每次 client 变更时 tick++，模板读取 client.s（普通对象也会重渲染）
@@ -212,6 +229,8 @@ const pos = reactive({ lng: null, lat: null })
 const road = reactive({ roadKind: 'closed', blockId: '', reason: '', note: '', points: [] })
 const signForm = reactive({})
 const progForm = reactive({})
+const branchInput = ref('')
+const branchList = ref([])
 
 function signSeed(d) {
   if (!signForm[d.id]) signForm[d.id] = { qty: d.outstanding, shortQty: 0, receiver: '' }
@@ -220,7 +239,7 @@ function signSeed(d) {
 // 模板中 v-model 需要可写的响应式属性；惰性建种子
 function sf(d) { return signSeed(d) }
 
-const bundle = computed(() => { void tick.value; return client.s.bundle })
+const bundle = computed(() => { void tick.value; return client.bundle })
 const warnings = computed(() => bundle.value?.warnings || [])
 const dispatches = computed(() => bundle.value?.dispatches || [])
 const orders = computed(() => bundle.value?.orders || [])
@@ -229,16 +248,35 @@ const pendingCount = computed(() => { void tick.value; return client.pending().l
 const unackedCount = computed(() => warnings.value.filter((w) => w.pendingRoles.includes('field')).length)
 const bundleStamp = computed(() => {
   void tick.value
-  if (!client.s.bundleAt) return ''
-  return new Date(client.s.bundleAt).toLocaleTimeString('zh-CN', { hour12: false })
+  if (!client.bundleAt) return ''
+  return new Date(client.bundleAt).toLocaleTimeString('zh-CN', { hour12: false })
 })
 
 function login() {
   if (!form.simId.trim() || !form.teamId.trim()) return alert('请填写推演 ID 与队伍标识')
-  client.configure({ simId: form.simId.trim(), teamId: form.teamId.trim(), teamName: form.teamName.trim() })
-  // 注册队伍（离线入队，联网补传）
+  const branchId = form.branchId.trim() || 'main'
+  client.configure({ simId: form.simId.trim(), teamId: form.teamId.trim(), teamName: form.teamName.trim(), branchId })
+  // 注册队伍（离线入队，联网补传到所钉分支）
   client.enqueue('registerTeam', { teamId: form.teamId.trim(), name: form.teamName.trim(), capabilities: ['repair'] })
   refresh()
+  loadBranches()
+}
+
+// 切换推演分支：在途补传先落地，待发动作仍补传回原分支，新动作进入新分支
+async function doSwitchBranch() {
+  const br = branchInput.value.trim()
+  if (!br || br === client.s.branchId) return
+  const n = client.pending().length
+  const tip = n
+    ? `当前分支还有 ${n} 条动作待补传，它们仍会补传回「${client.s.branchId}」；新动作将进入「${br}」。确认切换？`
+    : `切换到分支「${br}」？`
+  if (!confirm(tip)) return
+  await client.switchBranch(br)
+  branchInput.value = ''
+}
+
+async function loadBranches() {
+  try { branchList.value = await client.listBranches() } catch { branchList.value = [] }
 }
 
 async function doSync() {
@@ -251,7 +289,8 @@ async function refresh() {
 let timer = null
 onMounted(() => {
   form.simId = client.s.simId; form.teamId = client.s.teamId; form.teamName = client.s.teamName
-  if (client.configured) refresh()
+  form.branchId = client.s.branchId || 'main'
+  if (client.configured) { refresh(); loadBranches() }
   timer = setInterval(() => { if (navigator.onLine && client.configured) refresh() }, 15000)
 })
 onUnmounted(() => clearInterval(timer))

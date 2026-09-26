@@ -21,6 +21,7 @@
     "services": "node services/start-all.js",
     "test:services": "node services/test/integration.test.mjs",
     "test:field": "node services/test/field.test.mjs",
+    "test:field-branch": "node services/test/field-branch.test.mjs",
     "test:domain": "node services/test/domain.test.mjs",
     "services:up": "bash services/dev-up.sh",
     "services:down": "bash services/dev-down.sh"

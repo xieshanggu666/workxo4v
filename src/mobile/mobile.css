@@ -43,6 +43,19 @@ label input, label select { margin-top: 5px; }
 .net { font-size: 12px; background: rgba(255,255,255,.15); padding: 4px 8px; border-radius: 20px; }
 .sync-btn { padding: 6px 12px; font-size: 13px; }
 
+/* 分支切换条 */
+.branchbar {
+  display: flex; align-items: center; gap: 8px;
+  background: #eef2ff; border-bottom: 1px solid #d8e0f5;
+  padding: 6px 14px; font-size: 12px; color: #3b4a6b;
+}
+.branchbar .cur { font-weight: 700; white-space: nowrap; }
+.branchbar input {
+  flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px;
+  border: 1px solid #c6d0e8; border-radius: 8px; background: #fff;
+}
+.q-head .br { font-size: 11px; color: #5b6b8c; background: #eef1f6; border-radius: 6px; padding: 1px 6px; margin-left: 6px; }
+
 .hint { margin: 10px 14px 0; padding: 10px 12px; background: #fff4e5; border: 1px solid #ffd9a8; border-radius: 10px; font-size: 13px; color: #8a5210; }
 .hint.ok { background: #fdecec; border-color: #f5b9b5; color: #a23028; }
 
