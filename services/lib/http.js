@@ -11,7 +11,7 @@ export function send(res, status, body) {
 }
 
 export const ok = (res, data) => send(res, 200, { ok: true, ...(data || {}) })
-export const fail = (res, status, code, msg) => send(res, status, { ok: false, code, msg })
+export const fail = (res, status, code, msg, extra = null) => send(res, status, { ok: false, code, msg, ...(extra || {}) })
 
 export async function readBody(req, limit = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {

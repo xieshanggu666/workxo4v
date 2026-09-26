@@ -13,6 +13,7 @@ const root = path.join(here, '..')
 
 export const TPORTS = { gateway: 8100, ingestion: 8101, history: 8102, replay: 8103, field: 8104 }
 const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-svc-'))
+export const DATA_DIR = DATA
 
 let children = []
 

@@ -123,8 +123,28 @@ curl -X POST localhost:7100/sims/sim-1/resume -H 'content-type: application/json
   无路可绕出 advisory 交指挥员；现场报告恢复则阻断清除、绕行在剩余生效阻断视角下回直/重排）、
   库存（物资签收四本账、抢修按实际消耗结算归还）、工单（接单/进度/完工/验收联动解封）、
   回放分支（现场动作逐帧入时间轴，可 seek 精确还原，可分叉独立推演）。
+- **分支协同（切换推演分支开展离线作业）**：离线包、动作队列、补传回执、本地 HLC 全部按
+  「推演 × 分支 × 队伍」三级隔离——
+  - 磁盘布局 `<data>/field/<simId>/<teamId>/<branchId>/{queue.jsonl,clock.json}`；
+    动作**入队时即固定分支**（记录盖 `branchId`），补传永远回到动作产生的原分支，
+    现场切换视角不搬运动作、不改动作去向。`/sync` 默认遍历该队所有分支分组提交，
+    也可 `?branch=` 只补一支；逐条/分支汇总回执都带原分支标识。
+  - `POST /sims/:simId/teams/:teamId/switch-branch` 切换门户视角：锁内先排空各分支待发
+    （尽力补传回原分支，失败不阻塞切换），再预取目标分支离线包；切到尚未分叉的分支也允许
+    离线作业（带 `bundleError`），动作保留 `queued`，网关对不存在分支整批 404
+    （`branch-not-found`，区别于业务冲突），分支就绪后自动补传。
+  - **在途请求**：每支队伍一把同步锁，切换/并发补传串行化；移动端按分支快照执行，
+    切换期间未完成的请求其回执仍写回开同步时的分支队列，两不串账；同分支并发 sync
+    复用同一在途 Promise。
+  - **冲突重提固定原分支**：同 `clientActionId` 改分支重提一律 409 `branch-mismatch`
+    （回执带 `actual/expected`）；现场确认动作本应在另一分支执行时，走显式改投
+    （`requeueForBranch`：新 id、原动作移除、留痕 `movedFrom`），杜绝误投。
+  - **旧队列迁移**：旧版无分支布局 `<team>/{queue,clock}.json*` 首次启动自动迁入
+    `<team>/main/`（动作补盖 `branchId=main`、时钟随迁、幂等不重复）；移动端 localStorage
+    同步从 `field-sync-v1` 升级到 `field-sync-v2` 的分支结构。
 - **移动端页面**：`npm run dev` 后访问 `http://localhost:5173/mobile.html`（经 Vite 代理访问网关；
-  现场同步服务 :7104 提供等价的 outbox/sync/bundle HTTP 门户）。
+  现场同步服务 :7104 提供等价的 outbox/sync/bundle HTTP 门户）。顶栏可切换分支视角，
+  队列页支持「本分支 / 全部分支」分组查看、按分支补传与冲突改投。
 
 ### 旧快照迁移
 `POST /sims/migrate-snapshot`（回放服务）把前端 v1 单线 `frames`（含 `{cmd,tr,rb,ro}`
@@ -146,17 +166,23 @@ services/
 ├── store/          BranchStore（分支事件日志 + fork + 检查点 + 恢复）
 ├── servers/        五个可独立启动的服务进程 + start-all 监管
 ├── dev-up.sh / dev-down.sh
-└── test/           integration.test.mjs(92 项真实 HTTP) domain.test.mjs(36 项纯领域)
-                    field.test.mjs(71 项现场协同闭环真实 HTTP)
+└── test/           integration.test.mjs(92 项真实 HTTP) domain.test.mjs(43 项纯领域)
+                    field.test.mjs(73 项现场协同闭环真实 HTTP)
+                    branch-field.test.mjs(65 项离线作业分支协同真实 HTTP)
+                    fieldoutbox.test.mjs(35 项分支队列/迁移/改投纯磁盘单元)
 ```
 
 ## 测试
 
 ```bash
-npm run test:domain     # 36 项：纯函数因果/守恒/几何/迁移/投影，不启服务、秒级
-npm run test:services   # 92 项：四（五）服务真实 HTTP，覆盖下列全部能力
-npm run test:field      # 71 项：现场协同闭环（离线包/离线队列/因果补传/冲突/道路联动/
-                        #         抢修/预警回写/幂等重放/队列崩溃恢复/回放分叉）
+npm run test:domain       # 43 项：纯函数因果/守恒/几何/迁移/投影，不启服务、秒级
+npm run test:services     # 92 项：四（五）服务真实 HTTP，覆盖下列全部能力
+npm run test:field        # 73 项：现场协同闭环（离线包/离线队列/因果补传/冲突/道路联动/
+                          #         抢修/预警回写/幂等重放/队列崩溃恢复/回放分叉）
+npm run test:branch-field # 65 项：分支协同（三级隔离/补传固定回原分支/在途切换/
+                          #         branch-mismatch/未分叉推迟/崩溃恢复/旧队列迁移/多队伍）
+npm run test:fieldoutbox  # 35 项：FieldOutbox 分支队列纯单元（隔离/改投/迁移/流水恢复）
+npm run test:field-branch # 38 项：移动端同步引擎（v1 迁移/在途回执归属/并发去重/改投留痕）
 ```
 
 集成测试覆盖：命令→事件→投影因果重建、派发四本账守恒、床位/车辆守恒、
@@ -168,3 +194,10 @@ HLC 乱序重排、after 因果、幂等去重、并发超扣冲突守恒、**�
 逐条回执（重复签收/超量/进度回退/非法工单互不阻塞）、道路封闭自动绕行与恢复回直、
 抢修接单/进度/完工/验收/按实消耗回库、预警升级清空签收与撤销回落事件等级、
 弱网同动作重放幂等、现场服务崩溃后队列从流水恢复、现场动作入回放帧/seek/分叉隔离。
+
+分支协同测试覆盖：队列/时钟/离线包按 推演×分支×队伍 隔离、动作入队固定分支且补传回原分支、
+切换门户排空与新分支离线包预取、切换期间在途请求串行化且回执不串分支、
+冲突同 id 改分支重提被 branch-mismatch 拒绝（回原分支可重提）、显式改投留痕、
+切到未分叉分支时动作保留 queued（404 推迟而非误记冲突）、多分支队列崩溃恢复、
+旧版无分支队列自动迁移 main、多队伍同分支互不干扰；移动端另有 v1→v2 本地迁移、
+在途回执归属、同分支并发去重、网络故障不漂移等 38 项单测。

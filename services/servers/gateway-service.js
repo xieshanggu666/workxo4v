@@ -201,6 +201,10 @@ const app = createApp([
     const branchId = body.branchId || branch || 'main'
     const actions = Array.isArray(body.actions) ? body.actions : [body.action]
     if (!actions.length) return fail(res, 400, 'empty-actions', '缺少现场动作')
+    // 分支尚不存在（现场离线切到了未分叉的分支）：整批 404，让现场端把动作
+    // 保留 queued 推迟补传，而不是把每条都误记成冲突
+    const probe = await replayState(simId, branchId, true)
+    if (!probe) return fail(res, 404, 'branch-not-found', `分支 ${branchId} 尚不存在，动作保留待分支就绪后补传`)
     const results = []
     for (const action of actions) {
       const aid = action.clientActionId

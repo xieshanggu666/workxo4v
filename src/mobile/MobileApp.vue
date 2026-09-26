@@ -17,25 +17,39 @@
     </section>
 
     <template v-else>
-      <!-- 顶栏：连接状态 / 离线包时间 / 补传按钮 -->
+      <!-- 顶栏：连接状态 / 分支视角 / 离线包时间 / 补传按钮 -->
       <header class="topbar">
         <div class="who">
           <strong>{{ client.s.teamName || client.s.teamId }}</strong>
           <small>{{ client.s.simId }}</small>
         </div>
+        <!-- 推演分支视角切换：离线也可切，动作固定回各自原分支 -->
+        <label class="branch-pick">
+          🌿
+          <input
+            :list="branchListId"
+            :value="client.branchId"
+            @change="switchBranch"
+          />
+          <datalist :id="branchListId">
+            <option v-for="b in branchOptions" :key="b.branchId" :value="b.branchId">
+              {{ b.branchId }}（待发 {{ b.queued }} · 冲突 {{ b.conflict }}）
+            </option>
+          </datalist>
+        </label>
         <span class="net" :class="client.online ? 'on' : 'off'">
           {{ client.online ? '🟢 在线' : '🔴 离线' }}
         </span>
-        <button class="sync-btn" :disabled="client.syncing || !pendingCount" @click="doSync">
-          {{ client.syncing ? '补传中…' : (`补传${pendingCount ? `(${pendingCount})` : ''}`) }}
+        <button class="sync-btn" :disabled="client.syncing || !pendingTotal" @click="doSyncAll">
+          {{ client.syncing ? '补传中…' : (`补传${pendingTotal ? `(${pendingTotal})` : ''}`) }}
         </button>
       </header>
 
       <div class="hint" v-if="!client.online">
-        📵 当前离线，操作已存入本机队列；联网后将按发生顺序自动补传
+        📵 当前离线（分支 {{ client.branchId }}），操作已存入本机队列；联网后将按发生顺序自动补传回原分支
       </div>
-      <div class="hint ok" v-else-if="client.conflicts().length">
-        ⚠️ {{ client.conflicts().length }} 条补传存在冲突，请在「队列」中处理
+      <div class="hint ok" v-else-if="conflictTotal">
+        ⚠️ {{ conflictTotal }} 条补传存在冲突，请在「队列」中处理
       </div>
 
       <!-- 预警 -->
@@ -155,26 +169,41 @@
         </div>
       </section>
 
-      <!-- 队列：补传状态 / 冲突处理 -->
+      <!-- 队列：补传状态 / 冲突处理（按分支隔离，补传固定回原分支） -->
       <section v-show="tab === 'queue'" class="page">
         <h2>📤 同步队列
-          <small>待发 {{ pendingCount }} · 冲突 {{ client.conflicts().length }} · 已传 {{ client.acked().length }}</small>
+          <small>本分支待发 {{ pendingCount }} · 冲突 {{ currentConflicts.length }} · 全部待发 {{ pendingTotal }}</small>
         </h2>
-        <button class="primary block" :disabled="!pendingCount || client.syncing" @click="doSync">
-          {{ client.syncing ? '补传中…' : '立即联网补传（按因果顺序）' }}
+        <div class="seg">
+          <button :class="{ on: queueScope === 'current' }" @click="queueScope = 'current'">本分支（{{ client.branchId }}）</button>
+          <button :class="{ on: queueScope === 'all' }" @click="queueScope = 'all'">全部分支（{{ branchSummaries.length }}）</button>
+        </div>
+        <button class="primary block" :disabled="!pendingTotal || client.syncing" @click="doSyncAll">
+          {{ client.syncing ? '补传中…' : '立即联网补传（各分支按因果顺序回原分支）' }}
         </button>
-        <div v-if="!client.s.queue.length" class="empty">队列为空，所有操作均已闭环</div>
-        <div v-for="a in [...client.s.queue].reverse()" :key="a.clientActionId" class="card q" :class="a.status">
+        <div v-if="queueScope === 'all'" class="branch-summary">
+          <div v-for="b in branchSummaries" :key="b.branchId" class="brow" :class="{ current: b.branchId === client.branchId }">
+            <button class="link" @click="switchBranch(b.branchId)">🌿 {{ b.branchId }}</button>            <span>待发 {{ b.queued }} · 冲突 {{ b.conflict }} · 已闭环 {{ b.acked }}</span>
+            <button v-if="b.queued" class="mini" :disabled="client.isSyncing(b.branchId)" @click="client.sync(b.branchId)">
+              {{ client.isSyncing(b.branchId) ? '补传中…' : '补传该分支' }}
+            </button>
+          </div>
+        </div>
+        <div v-if="!visibleQueue.length" class="empty">队列为空，所有操作均已闭环</div>
+        <div v-for="a in [...visibleQueue].reverse()" :key="a.clientActionId" class="card q" :class="a.status">
           <div class="q-head">
             <b>{{ actionLabel(a.kind) }}</b>
+            <span class="badge branch" v-if="a.branchId !== client.branchId">🌿 {{ a.branchId }}</span>
             <span class="badge">{{ statusLabel(a.status) }}</span>
           </div>
-          <small>{{ a.at }} · {{ a.clientActionId.slice(0, 14) }}… · 尝试 {{ a.attempts }}</small>
+          <small>{{ a.at }} · {{ a.clientActionId.slice(0, 14) }}… · 尝试 {{ a.attempts }} · 固定分支 🌿{{ a.branchId }}</small>
+          <p v-if="a.movedFrom" class="adv">由分支 {{ a.movedFrom.branchId }} 的 {{ a.movedFrom.clientActionId.slice(0, 12) }}… 改投而来</p>
           <div v-if="a.status === 'conflict'" class="conflict">
             <p>⛔ {{ a.result?.msg || '业务前置不满足或与并发处置冲突' }}</p>
             <p v-if="a.result?.advisory?.length" class="adv">联动提示：{{ a.result.advisory.join('；') }}</p>
             <div class="q-actions">
-              <button class="mini" @click="quickRetry(a)">原样重提</button>
+              <button class="mini" @click="quickRetry(a)">原样重提（回原分支）</button>
+              <button class="mini" @click="moveRetry(a)">修正后改投当前分支</button>
               <button class="mini danger" @click="client.discard(a.clientActionId)">丢弃</button>
             </div>
           </div>
@@ -189,7 +218,7 @@
         <button :class="{ on: tab === 'task' }" @click="tab = 'task'">📦<span>任务</span></button>
         <button :class="{ on: tab === 'report' }" @click="tab = 'report'">🛰️<span>上报</span></button>
         <button :class="{ on: tab === 'queue' }" @click="tab = 'queue'">
-          📤<span>队列<i v-if="pendingCount" class="dot red">{{ pendingCount }}</i><i v-else-if="client.conflicts().length" class="dot">{{ client.conflicts().length }}</i></span>
+          📤<span>队列<i v-if="pendingTotal" class="dot red">{{ pendingTotal }}</i><i v-else-if="conflictTotal" class="dot">{{ conflictTotal }}</i></span>
         </button>
       </nav>
     </template>
@@ -203,6 +232,7 @@ import { FieldClient } from './sync.js'
 const client = new FieldClient(() => {}) // 用下面的响应式镜像驱动视图
 const form = reactive({ simId: '', teamId: '', teamName: '' })
 const tab = ref('warn')
+const queueScope = ref('current') // 队列页视角：current | all
 
 // 响应式镜像：每次 client 变更时 tick++，模板读取 client.s（普通对象也会重渲染）
 const tick = ref(0)
@@ -220,23 +250,57 @@ function signSeed(d) {
 // 模板中 v-model 需要可写的响应式属性；惰性建种子
 function sf(d) { return signSeed(d) }
 
-const bundle = computed(() => { void tick.value; return client.s.bundle })
+const bundle = computed(() => { void tick.value; return client.s.branches[client.branchId]?.bundle })
 const warnings = computed(() => bundle.value?.warnings || [])
 const dispatches = computed(() => bundle.value?.dispatches || [])
 const orders = computed(() => bundle.value?.orders || [])
 const activeBlocks = computed(() => bundle.value?.blocks || [])
-const pendingCount = computed(() => { void tick.value; return client.pending().length })
+const pendingCount = computed(() => { void tick.value; return client.pending(client.branchId).length })
+const pendingTotal = computed(() => { void tick.value; return client.pending().length })
+const conflictTotal = computed(() => { void tick.value; return client.conflicts().length })
+const currentConflicts = computed(() => { void tick.value; return client.conflicts(client.branchId) })
 const unackedCount = computed(() => warnings.value.filter((w) => w.pendingRoles.includes('field')).length)
 const bundleStamp = computed(() => {
   void tick.value
-  if (!client.s.bundleAt) return ''
-  return new Date(client.s.bundleAt).toLocaleTimeString('zh-CN', { hour12: false })
+  const at = client.s.branches[client.branchId]?.bundleAt
+  if (!at) return ''
+  return new Date(at).toLocaleTimeString('zh-CN', { hour12: false })
 })
+// 分支切换器候选项：本地留过痕的分支（离线也可切换）
+const branchListId = 'field-branches'
+const branchSummaries = computed(() => { void tick.value; return client.allBranchSummaries() })
+const branchOptions = computed(() => {
+  void tick.value
+  const known = client.allBranchSummaries()
+  if (!known.some((b) => b.branchId === client.branchId)) {
+    return [{ branchId: client.branchId, queued: 0, conflict: 0, acked: 0 }, ...known]
+  }
+  return known
+})
+// 队列页展示：本分支（按当前视角）或全部分支展开
+const visibleQueue = computed(() => {
+  void tick.value
+  if (queueScope.value === 'all') return client._filter(null)
+  return client._filter(null, client.branchId)
+})
+
+async function switchBranch(arg) {
+  // 顶栏 @change 传 Event；队列页按钮直接传分支 id
+  const raw = arg?.target ? arg.target.value : arg
+  const branchId = (raw || '').trim()
+  if (!branchId || branchId === client.branchId) {
+    if (arg?.target) arg.target.value = client.branchId
+    return
+  }
+  const switched = await client.switchBranch(branchId).catch((err) => { alert('切换失败：' + err.message); return null })
+  if (!switched && arg?.target) arg.target.value = client.branchId
+  if (switched) await refresh()
+}
 
 function login() {
   if (!form.simId.trim() || !form.teamId.trim()) return alert('请填写推演 ID 与队伍标识')
   client.configure({ simId: form.simId.trim(), teamId: form.teamId.trim(), teamName: form.teamName.trim() })
-  // 注册队伍（离线入队，联网补传）
+  // 注册队伍（离线入队，联网补传，固定在当前分支 main）
   client.enqueue('registerTeam', { teamId: form.teamId.trim(), name: form.teamName.trim(), capabilities: ['repair'] })
   refresh()
 }
@@ -245,8 +309,12 @@ async function doSync() {
   await client.sync()
   await refresh()
 }
+async function doSyncAll() {
+  await client.syncAll()
+  await refresh()
+}
 async function refresh() {
-  try { await client.fetchBundle() } catch { /* 离线时使用缓存 */ }
+  try { await client.fetchBundle() } catch { /* 离线时使用当前分支缓存 */ }
 }
 let timer = null
 onMounted(() => {
@@ -310,8 +378,13 @@ function reportRoad() {
   }
 }
 function quickRetry(a) {
-  // 原样重提：新动作复用同一业务参数（旧冲突项丢弃，避免同 id 永久冲突）
+  // 原样重提：新动作复用同一业务参数（旧冲突项丢弃，避免同 id 永久冲突）；固定回原分支
   client.retryWith(a.clientActionId, {})
+}
+function moveRetry(a) {
+  // 现场确认动作本应在当前视角分支执行：修正改投（新 id、留痕 movedFrom）
+  if (a.branchId === client.branchId) return
+  client.requeueForBranch(a.clientActionId, client.branchId)
 }
 
 const LEVEL = { yellow: '黄色', orange: '橙色', red: '红色' }
